@@ -12,6 +12,9 @@ from openpyxl.styles import PatternFill
 import phonenumbers
 from phonenumbers.phonenumberutil import country_code_for_region
 
+# ✅ NEW: global fallback country lookup
+import pycountry
+
 
 # ------------------ UI / Page config ------------------
 st.set_page_config(page_title="Lead Quality Checker (AWS)", page_icon="✅", layout="wide")
@@ -174,6 +177,39 @@ COUNTRY_TO_REGIONS = {
     "belgium": ["BE"],
     "portugal": ["PT"],
 }
+
+# ✅ NEW: SAFE fallback (only used when COUNTRY_TO_REGIONS has no mapping)
+@st.cache_data(show_spinner=False)
+def fallback_regions_from_country_label(country_label: str) -> list[str]:
+    """
+    Fallback ONLY. Returns ISO alpha-2 region codes like ['CZ'] using pycountry.
+    This never runs for already-mapped countries, so it won't change current behavior.
+    """
+    if not country_label or str(country_label).strip() == "":
+        return []
+
+    raw = str(country_label).strip()
+
+    # try raw label first
+    try:
+        c = pycountry.countries.lookup(raw)
+        a2 = getattr(c, "alpha_2", None)
+        if a2:
+            return [a2]
+    except Exception:
+        pass
+
+    # try canonicalised label second
+    try:
+        canon = canon_country_key(raw)
+        c = pycountry.countries.lookup(canon)
+        a2 = getattr(c, "alpha_2", None)
+        if a2:
+            return [a2]
+    except Exception:
+        pass
+
+    return []
 
 
 # ------------------ Company ↔ domain helpers ------------------
@@ -341,7 +377,14 @@ def phone_country_check(raw_phone, country_label) -> tuple[str, str]:
         return "Unsure", "Missing country"
 
     canon = canon_country_key(country_label)
+
+    # Preserve current behaviour for mapped countries
     regions = COUNTRY_TO_REGIONS.get(canon, [])
+
+    # ✅ SAFE fallback only if unmapped (previously returned "No phone region mapping...")
+    if not regions:
+        regions = fallback_regions_from_country_label(country_label)
+
     if not regions:
         return "Unsure", f"No phone region mapping for '{country_label}'"
 
@@ -727,7 +770,9 @@ def run_matching(master_bytes: bytes, picklist_bytes: bytes, master_sheet: str, 
                 if pc in name_to_newcol:
                     set_fill(r, name_to_newcol[pc], norm_text(df_out.at[i, pc]) == "match")
 
-            for rc in [c for c in df_out.columns if c.endswith("_PhoneCountry_Reason")] + (["PhoneCountry_Reason"] if "PhoneCountry_Reason" in df_out.columns else []):
+            for rc in [c for c in df_out.columns if c.endswith("_PhoneCountry_Reason")] + (
+                ["PhoneCountry_Reason"] if "PhoneCountry_Reason" in df_out.columns else []
+            ):
                 if rc in name_to_newcol:
                     set_fill(r, name_to_newcol[rc], norm_text(df_out.at[i, rc]) == "valid for country")
 
@@ -753,14 +798,15 @@ st.caption(
     "This version supports masters/picklists with different formats.\n\n"
     "✅ Picklist is the bible: we only overwrite master values when we are sure.\n"
     "🗓 Dates/times are preserved because we do NOT rebuild the sheet.\n"
+    "📞 Phone validation now includes a SAFE fallback for unmapped countries (does not affect existing mapped countries).\n"
 )
+
 # Campaign type selector
 mode = st.selectbox(
     "Campaign Type",
     ["COMMERCIAL", "WHOLESALE"],
     index=0
 )
-
 
 col1, col2 = st.columns(2)
 with col1:
